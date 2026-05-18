@@ -1,0 +1,14 @@
+[project]
+name = "conversation-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.13.5",
+    "dotenv>=0.9.9",
+    "fastapi>=0.136.1",
+    "pipecat>=0.3.0",
+    "pipecat-ai[deepgram,elevenlabs]>=1.2.1",
+    "uvicorn>=0.47.0",
+]

@@ -1,0 +1,7 @@
+dotenv
+aiohttp
+uvicorn
+fastapi
+pipecat
+pipecat-ai[elevenlabs]
+pipecat-ai[deepgram]
