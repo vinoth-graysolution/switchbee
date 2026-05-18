@@ -75,6 +75,7 @@ async def make_exotel_call(session: aiohttp.ClientSession, to_number: str, from_
 async def lifespan(app: FastAPI):
     # Create aiohttp session for Exotel API calls
     app.state.session = aiohttp.ClientSession()
+    app.state.candidate_names = {}  # Map call_sid -> candidate_name
     yield
     # Close session when shutting down
     await app.state.session.close()
@@ -124,6 +125,9 @@ async def initiate_outbound_call(request: Request) -> JSONResponse:
 
             # Extract call SID from Exotel response
             call_sid = call_result.get("call_sid", "unknown")
+            if call_sid != "unknown":
+                request.app.state.candidate_names[call_sid] = data.get("candidate_data", {}).get("name", "Candidate")
+            request.app.state.latest_candidate_name = data.get("candidate_data", {}).get("name", "Candidate")
 
         except Exception as e:
             print(f"Error initiating Exotel call: {e}")
@@ -159,7 +163,9 @@ async def websocket_endpoint(websocket: WebSocket):
         runner_args = WebSocketRunnerArguments(websocket=websocket)
         runner_args.handle_sigint = False
 
-        await bot(runner_args)
+        candidate_names_map = getattr(websocket.app.state, "candidate_names", {})
+        latest_name = getattr(websocket.app.state, "latest_candidate_name", "Candidate")
+        await bot(runner_args, candidate_names_map, latest_name)
 
     except Exception as e:
         print(f"Error in WebSocket endpoint: {e}")

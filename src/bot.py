@@ -39,7 +39,7 @@ from prompt import get_system_prompt
 load_dotenv(override=True)
 
 
-async def run_bot(transport: BaseTransport, handle_sigint: bool):
+async def run_bot(transport: BaseTransport, handle_sigint: bool, candidate_name: str = "Candidate"):
 
     logger.info("Initializing AI voice pipeline")
 
@@ -58,20 +58,23 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
 
     # ----------------- TTS ----------------- #
     tts = SarvamTTSService(
-        api_key=os.getenv("SARVAM_API_KEY"),
-        settings=SarvamTTSService.Settings(
-            voice="anushka",
-            model="bulbul:v2",
-            language=None,
-        ),
-    )
+            api_key=os.getenv("SARVAM_API_KEY"),
+            settings=SarvamTTSService.Settings(
+                voice="anushka",
+                model="bulbul:v2",
+                language=Language.EN,
+                pitch=0.1,
+                pace=1.2,
+                loudness=1.5,
+            ),
+        )
 
     # ----------------- CONTEXT ----------------- #
 
     messages = [
         {
             "role": "system",
-            "content": get_system_prompt(),
+            "content": get_system_prompt(candidate_name),
         }
     ]
 
@@ -120,7 +123,7 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
         await task.queue_frames(
             [
                 TextFrame(
-                    "Hello, am I speaking with the candidate?"
+                    f"Hello, am I speaking with {candidate_name}?"
                 )
             ]
         )
@@ -137,7 +140,7 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
     await runner.run(task)
 
 
-async def bot(runner_args: RunnerArguments):
+async def bot(runner_args: RunnerArguments, candidate_names_map: dict = None, latest_name: str = "Candidate"):
     """Main bot entry point."""
 
     logger.info("Waiting for Exotel websocket connection")
@@ -170,6 +173,10 @@ async def bot(runner_args: RunnerArguments):
         call_sid=call_sid,
     )
 
+    candidate_name = latest_name
+    if candidate_names_map and call_sid and call_sid in candidate_names_map:
+        candidate_name = candidate_names_map[call_sid]
+
     transport = FastAPIWebsocketTransport(
         websocket=runner_args.websocket,
         params=FastAPIWebsocketParams(
@@ -179,8 +186,4 @@ async def bot(runner_args: RunnerArguments):
             serializer=serializer,
         ),
     )
-
-    await run_bot(
-        transport=transport,
-        handle_sigint=runner_args.handle_sigint,
-    )
+    await run_bot(transport, getattr(runner_args, "handle_sigint", False), candidate_name)
