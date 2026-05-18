@@ -287,7 +287,7 @@ dependencies = [
     { name = "dotenv" },
     { name = "fastapi" },
     { name = "pipecat" },
-    { name = "pipecat-ai", extra = ["deepgram", "elevenlabs"] },
+    { name = "pipecat-ai", extra = ["deepgram", "elevenlabs", "sarvam", "websocket"] },
     { name = "uvicorn" },
 ]
 
@@ -297,7 +297,7 @@ requires-dist = [
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "fastapi", specifier = ">=0.136.1" },
     { name = "pipecat", specifier = ">=0.3.0" },
-    { name = "pipecat-ai", extras = ["deepgram", "elevenlabs"], specifier = ">=1.2.1" },
+    { name = "pipecat-ai", extras = ["deepgram", "elevenlabs", "sarvam", "websocket"], specifier = ">=1.2.1" },
     { name = "uvicorn", specifier = ">=0.47.0" },
 ]
 
@@ -1254,6 +1254,14 @@ deepgram = [
 elevenlabs = [
     { name = "websockets" },
 ]
+sarvam = [
+    { name = "sarvamai" },
+    { name = "websockets" },
+]
+websocket = [
+    { name = "fastapi" },
+    { name = "websockets" },
+]
 
 [[package]]
 name = "platformdirs"
@@ -1755,6 +1763,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/d8/0c8a7dc9b41dcac53c4cbf9df2b9c83e0e0097203de8b37a712b345c0be5/safetensors-0.7.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b0f6d66c1c538d5a94a73aa9ddca8ccc4227e6c9ff555322ea40bdd142391dd4", size = 677368, upload-time = "2025-11-19T15:18:41.627Z" },
     { url = "https://files.pythonhosted.org/packages/05/e5/cb4b713c8a93469e3c5be7c3f8d77d307e65fe89673e731f5c2bfd0a9237/safetensors-0.7.0-cp38-abi3-win32.whl", hash = "sha256:c74af94bf3ac15ac4d0f2a7c7b4663a15f8c2ab15ed0fc7531ca61d0835eccba", size = 326423, upload-time = "2025-11-19T15:18:45.74Z" },
     { url = "https://files.pythonhosted.org/packages/5d/e6/ec8471c8072382cb91233ba7267fd931219753bb43814cbc71757bfd4dab/safetensors-0.7.0-cp38-abi3-win_amd64.whl", hash = "sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755", size = 341380, upload-time = "2025-11-19T15:18:44.427Z" },
+]
+
+[[package]]
+name = "sarvamai"
+version = "0.1.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/23/44/57a7a37be64953bb0bec9f674e92a9f8fb7070ce6aeb44c6f22720458b40/sarvamai-0.1.28.tar.gz", hash = "sha256:bc52f0c849e429d1a4493e49b1b4b65bf06965f3936d4eb6ee3da3130452e7ea", size = 139022, upload-time = "2026-04-20T08:05:12.185Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/90/95cd195a3a2ae9a9973c6a05705207e8dd97b5aea90339bc24343cb54850/sarvamai-0.1.28-py3-none-any.whl", hash = "sha256:52e71c0a0f521552d4d948ec452699b44554a56e64ee354b14da2efc9d9046b3", size = 269335, upload-time = "2026-04-20T08:05:10.712Z" },
 ]
 
 [[package]]

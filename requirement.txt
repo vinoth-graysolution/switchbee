@@ -5,3 +5,5 @@ fastapi
 pipecat
 pipecat-ai[elevenlabs]
 pipecat-ai[deepgram]
+pipecat-ai[websocket]
+pipecat-ai[sarvam]

@@ -22,7 +22,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.exotel import ExotelFrameSerializer
-from pipecat.services.sarvam import SarvamTTSService
+from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 # from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -57,15 +57,12 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
     )
 
     # ----------------- TTS ----------------- #
-
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
-        model="bulbul:v3-beta",
-        voice_id="shubh",
-        params=SarvamTTSService.InputParams(
-            language=Language.EN,
-            pace=1.1,
-            temperature=0.01,
+        settings=SarvamTTSService.Settings(
+            voice="anushka",
+            model="bulbul:v2",
+            language=None,
         ),
     )
 
