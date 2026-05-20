@@ -4,14 +4,17 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""server.py
+"""service.py
 
 Webhook server to handle outbound call requests, initiate calls via Exotel API,
-and handle subsequent WebSocket connections for Media Streams.
+handle subsequent WebSocket connections for Media Streams, and automatically
+separate candidates into interested.csv / not_interested.csv.
 """
 
+import csv
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiohttp
 import uvicorn
@@ -23,7 +26,53 @@ from fastapi.responses import JSONResponse
 load_dotenv(override=True)
 
 
-# ----------------- HELPERS ----------------- #
+# ─────────────────────────────────────────────────────────────
+# CSV output paths  (same folder as candidates.csv)
+# ─────────────────────────────────────────────────────────────
+
+_SRC_DIR = Path(__file__).parent
+INTERESTED_CSV = _SRC_DIR / "interested.csv"
+NOT_INTERESTED_CSV = _SRC_DIR / "not_interested.csv"
+
+CSV_FIELDNAMES = ["name", "phone", "role", "outcome"]
+
+
+def _ensure_csv(path: Path):
+    """Create CSV file with header if it does not exist yet."""
+    if not path.exists():
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+            writer.writeheader()
+
+
+def write_outcome(name: str, phone: str, role: str, outcome: str):
+    """
+    Append a candidate row to the appropriate CSV file.
+
+    Args:
+        name:    Candidate name.
+        phone:   Candidate phone number.
+        role:    Job role applied for.
+        outcome: 'interested' or 'not_interested'.
+    """
+    csv_path = INTERESTED_CSV if outcome == "interested" else NOT_INTERESTED_CSV
+    _ensure_csv(csv_path)
+
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+        writer.writerow(
+            {"name": name, "phone": phone, "role": role, "outcome": outcome}
+        )
+
+    print(
+        f"[CSV] {outcome.upper()}: {name} ({phone}) → "
+        f"{'interested.csv' if outcome == 'interested' else 'not_interested.csv'}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
 
 
 async def make_exotel_call(session: aiohttp.ClientSession, to_number: str, from_number: str):
@@ -35,18 +84,15 @@ async def make_exotel_call(session: aiohttp.ClientSession, to_number: str, from_
     if not all([api_key, api_token, sid]):
         raise ValueError("Missing Exotel credentials: EXOTEL_API_KEY, EXOTEL_API_TOKEN, EXOTEL_SID")
 
-    # Exotel Connect API endpoint
     url = f"https://api.exotel.com/v1/Accounts/{sid}/Calls/connect"
 
-    # Use form data for Exotel Connect Two Numbers API
     data = {
-        "From": from_number,  # Bot number (called first, connects to WebSocket via App Bazaar)
-        "To": to_number,  # Customer number (called second, after bot "answers")
-        "CallerId": from_number,  # Your ExoPhone number
-        "CallType": "trans",  # Transactional call
+        "From": from_number,
+        "To": to_number,
+        "CallerId": from_number,
+        "CallType": "trans",
     }
 
-    # Use HTTP Basic Auth
     auth = aiohttp.BasicAuth(api_key, api_token)
 
     async with session.post(url, data=data, auth=auth) as response:
@@ -54,10 +100,8 @@ async def make_exotel_call(session: aiohttp.ClientSession, to_number: str, from_
             error_text = await response.text()
             raise Exception(f"Exotel API error ({response.status}): {error_text}")
 
-        # Exotel returns XML by default, extract key information
         result_text = await response.text()
 
-        # Extract Sid from XML response for tracking
         call_sid = "unknown"
         if "<Sid>" in result_text:
             start = result_text.find("<Sid>") + 5
@@ -68,16 +112,23 @@ async def make_exotel_call(session: aiohttp.ClientSession, to_number: str, from_
         return {"status": "call_initiated", "call_sid": call_sid}
 
 
-# ----------------- API ----------------- #
+# ─────────────────────────────────────────────────────────────
+# App
+# ─────────────────────────────────────────────────────────────
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create aiohttp session for Exotel API calls
     app.state.session = aiohttp.ClientSession()
-    app.state.candidate_names = {}  # Map call_sid -> candidate_name
+    app.state.candidate_names = {}   # call_sid  → name
+    app.state.candidate_phones = {}  # call_sid  → phone
+    app.state.candidate_roles = {}   # call_sid  → role
+
+    # Ensure output CSVs exist with headers
+    _ensure_csv(INTERESTED_CSV)
+    _ensure_csv(NOT_INTERESTED_CSV)
+
     yield
-    # Close session when shutting down
     await app.state.session.close()
 
 
@@ -85,7 +136,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for testing
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,22 +151,22 @@ async def initiate_outbound_call(request: Request) -> JSONResponse:
     try:
         data = await request.json()
 
-        # Validate request data
         if not data.get("dialout_settings"):
             raise HTTPException(
                 status_code=400, detail="Missing 'dialout_settings' in the request body"
             )
-
         if not data["dialout_settings"].get("phone_number"):
             raise HTTPException(
                 status_code=400, detail="Missing 'phone_number' in dialout_settings"
             )
 
-        # Extract the phone number to dial
         phone_number = str(data["dialout_settings"]["phone_number"])
-        print(f"Processing outbound call to {phone_number}")
+        candidate_data = data.get("candidate_data", {})
+        candidate_name = candidate_data.get("name", "Candidate")
+        candidate_role = candidate_data.get("role", "")
 
-        # Initiate outbound call via Exotel Connect API
+        print(f"Processing outbound call to {phone_number} for {candidate_name}")
+
         try:
             call_result = await make_exotel_call(
                 session=request.app.state.session,
@@ -123,11 +174,18 @@ async def initiate_outbound_call(request: Request) -> JSONResponse:
                 from_number=os.getenv("EXOTEL_PHONE_NUMBER"),
             )
 
-            # Extract call SID from Exotel response
             call_sid = call_result.get("call_sid", "unknown")
+
+            # Store candidate metadata keyed by call_sid for later CSV write
             if call_sid != "unknown":
-                request.app.state.candidate_names[call_sid] = data.get("candidate_data", {}).get("name", "Candidate")
-            request.app.state.latest_candidate_name = data.get("candidate_data", {}).get("name", "Candidate")
+                request.app.state.candidate_names[call_sid] = candidate_name
+                request.app.state.candidate_phones[call_sid] = phone_number
+                request.app.state.candidate_roles[call_sid] = candidate_role
+
+            # Fallback for cases where call_sid is unknown
+            request.app.state.latest_candidate_name = candidate_name
+            request.app.state.latest_candidate_phone = phone_number
+            request.app.state.latest_candidate_role = candidate_role
 
         except Exception as e:
             print(f"Error initiating Exotel call: {e}")
@@ -155,25 +213,50 @@ async def websocket_endpoint(websocket: WebSocket):
     print("WebSocket connection accepted for outbound call")
 
     try:
-        # Import the bot function from the bot module
         from bot import bot
         from pipecat.runner.types import WebSocketRunnerArguments
 
-        # Create runner arguments and run the bot
         runner_args = WebSocketRunnerArguments(websocket=websocket)
         runner_args.handle_sigint = False
 
         candidate_names_map = getattr(websocket.app.state, "candidate_names", {})
+        candidate_phones_map = getattr(websocket.app.state, "candidate_phones", {})
+        candidate_roles_map = getattr(websocket.app.state, "candidate_roles", {})
         latest_name = getattr(websocket.app.state, "latest_candidate_name", "Candidate")
-        await bot(runner_args, candidate_names_map, latest_name)
+        latest_phone = getattr(websocket.app.state, "latest_candidate_phone", "")
+        latest_role = getattr(websocket.app.state, "latest_candidate_role", "")
+
+        def on_outcome(name: str, outcome: str):
+            """
+            Callback fired by the bot when candidate interest is detected.
+            Looks up phone & role from the shared state maps.
+            """
+            # Try to resolve phone/role from map; fall back to latest values
+            phone = latest_phone
+            role = latest_role
+            for sid, n in candidate_names_map.items():
+                if n == name:
+                    phone = candidate_phones_map.get(sid, latest_phone)
+                    role = candidate_roles_map.get(sid, latest_role)
+                    break
+
+            write_outcome(name=name, phone=phone, role=role, outcome=outcome)
+
+        await bot(
+            runner_args,
+            candidate_names_map,
+            latest_name,
+            on_outcome=on_outcome,
+        )
 
     except Exception as e:
         print(f"Error in WebSocket endpoint: {e}")
         await websocket.close()
 
 
-# ----------------- Main ----------------- #
-
+# ─────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7860)
