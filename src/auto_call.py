@@ -1,195 +1,131 @@
-"""
-auto_call.py
-
-Concurrent outbound AI call trigger system.
-
-Features:
-- Async concurrent outbound calling
-- Configurable concurrency limit
-- Exotel-friendly throttling
-- Better error handling
-- Production-ready structure
-"""
-
-import asyncio
 import csv
-from typing import Dict, List
+import requests
+import time
+import os
+import xml.etree.ElementTree as ET
+from dotenv import load_dotenv
 
-import aiohttp
-
-# ─────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────
-
-NGROK_URL = "https://psychologically-nonprecious-vonnie.ngrok-free.dev/start"
-
-CANDIDATES_CSV = r"D:\conversation_ai\src\candidates.csv"
-
-# IMPORTANT:
-# Set this based on your Exotel concurrent limit.
-#
-# Example:
-# If Exotel allows 10 concurrent slots
-# and each AI conversation uses 2 call legs:
-#
-# MAX_CONCURRENT_CALLS = 5
-#
-MAX_CONCURRENT_CALLS = 5
-
-# Small delay between scheduling calls
-# Prevents sudden API bursts
-CALL_SPAWN_DELAY = 1
-
-# HTTP timeout
-REQUEST_TIMEOUT = 30
-
-# ─────────────────────────────────────────────────────────────
-# Semaphore
-# ─────────────────────────────────────────────────────────────
-
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
+load_dotenv()
 
 
-# ─────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────
+# Read the outbound server URL from .env (auto-updates when ngrok restarts)
+OUTBOUND_SERVER_URL = os.getenv("OUTBOUND_SERVER_URL", "")
+NGROK_URL = OUTBOUND_SERVER_URL if OUTBOUND_SERVER_URL else ""
 
-def load_candidates() -> List[Dict]:
-    """Load candidates from CSV."""
-    candidates = []
+# Exotel credentials
+ACCOUNT_SID = os.getenv("EXOTEL_SID")
+API_KEY = os.getenv("EXOTEL_API_KEY")
+API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
-    with open(CANDIDATES_CSV, "r", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
+# Exotel call details API (uses correct subdomain from .env)
+CALL_DETAILS_URL = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{ACCOUNT_SID}/Calls/{{call_sid}}"
 
-        for row in reader:
-            phone = row.get("phone", "").strip()
 
-            if not phone:
-                continue
-
-            candidates.append(
-                {
-                    "name": row.get("name", "").strip(),
-                    "phone": phone,
-                    "role": row.get("role", "").strip(),
-                }
+def wait_until_call_completed(call_sid):
+    error_count = 0
+    while True:
+        try:
+            response = requests.get(
+                CALL_DETAILS_URL.format(call_sid=call_sid),
+                auth=(API_KEY, API_TOKEN)
             )
 
-    return candidates
+            print("Status Code:", response.status_code)
+            print("Raw Response:", response.text)
+
+            # Reset error count on successful HTTP request
+            error_count = 0
+
+            # Parse XML response safely using ElementTree
+            root = ET.fromstring(response.text)
+            status_elem = root.find(".//Status")
+            if status_elem is not None and status_elem.text:
+                call_status = status_elem.text.strip()
+            else:
+                raise ValueError("Status tag not found or empty in response XML")
+
+            print(f"Current Call Status: {call_status}")
+
+            if call_status.lower() in [
+                "completed",
+                "busy",
+                "failed",
+                "no-answer",
+                "canceled"
+            ]:
+                print("Call finished.")
+                return call_status.lower()
+
+        except Exception as e:
+            error_count += 1
+            print(f"Status Check Error (attempt {error_count}/10):", str(e))
+            if error_count >= 10:
+                print("Too many consecutive status check errors. Moving to next candidate.")
+                return "failed"
+
+        time.sleep(10)
 
 
-# ─────────────────────────────────────────────────────────────
-# Call Logic
-# ─────────────────────────────────────────────────────────────
+UNANSWERED_CSV = r"D:\conversation_ai\src\unanswered.csv"
 
-async def trigger_call(
-    session: aiohttp.ClientSession,
-    candidate: Dict,
-):
-    """
-    Trigger one outbound AI call.
-    """
 
-    async with semaphore:
+def write_unanswered(name, phone, role, status):
+    file_exists = os.path.exists(UNANSWERED_CSV)
+    with open(UNANSWERED_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["name", "phone", "role", "status"])
+        writer.writerow([name, phone, role, status])
 
-        name = candidate["name"]
-        phone = candidate["phone"]
-        role = candidate["role"]
+
+with open(r"D:\conversation_ai\src\candidates.csv", "r", encoding="utf-8") as file:
+
+    reader = csv.DictReader(file)
+
+    for row in reader:
+
+        candidate_name = row["name"]
+        phone_number = row["phone"]
+        candidate_role = row.get("role", "")
 
         payload = {
             "dialout_settings": {
-                "phone_number": phone
+                "phone_number": phone_number
             },
             "candidate_data": {
-                "name": name,
-                "role": role,
-            },
+                "name": candidate_name,
+                "role": candidate_role
+            }
         }
 
-        print("=" * 60)
-        print(f"📞 Starting Call")
-        print(f"👤 Candidate : {name}")
-        print(f"💼 Role      : {role}")
-        print(f"📱 Phone     : {phone}")
-        print("=" * 60)
+        print(f"\nCalling {candidate_name} -> {phone_number}")
 
         try:
-            async with session.post(
+
+            response = requests.post(
                 NGROK_URL,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as response:
-
-                response_text = await response.text()
-
-                print(f"✅ Status : {response.status}")
-
-                if response.status == 200:
-                    print(f"🚀 Call initiated successfully")
-                else:
-                    print(f"❌ Failed to initiate call")
-
-                print(f"📄 Response : {response_text[:300]}")
-
-        except asyncio.TimeoutError:
-            print(f"⏰ Timeout while calling {phone}")
-
-        except aiohttp.ClientError as e:
-            print(f"🌐 Network error for {phone}: {e}")
-
-        except Exception as e:
-            print(f"⚠ Unexpected error for {phone}: {e}")
-
-
-# ─────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────
-
-async def main():
-
-    print("\n" + "=" * 70)
-    print("🤖 CONCURRENT AI CALLING SYSTEM")
-    print("=" * 70)
-
-    print(f"📊 Max Concurrent Calls : {MAX_CONCURRENT_CALLS}")
-
-    candidates = load_candidates()
-
-    print(f"📂 Loaded Candidates    : {len(candidates)}")
-
-    if not candidates:
-        print("❌ No valid candidates found")
-        return
-
-    connector = aiohttp.TCPConnector(limit=100)
-
-    async with aiohttp.ClientSession(connector=connector) as session:
-
-        tasks = []
-
-        for candidate in candidates:
-
-            task = asyncio.create_task(
-                trigger_call(session, candidate)
+                timeout=30
             )
 
-            tasks.append(task)
+            print("Start API Status:", response.status_code)
 
-            # Small stagger delay
-            await asyncio.sleep(CALL_SPAWN_DELAY)
+            response_data = response.json()
 
-        print("\n🚀 All call tasks scheduled\n")
+            # IMPORTANT:
+            # Your backend must return Exotel Call SID
+            call_sid = response_data["call_sid"]
 
-        await asyncio.gather(*tasks)
+            print("Call SID:", call_sid)
 
-    print("\n" + "=" * 70)
-    print("✅ ALL CALLS COMPLETED")
-    print("=" * 70)
+            # Wait until call completed
+            final_status = wait_until_call_completed(call_sid)
 
+            if final_status != "completed":
+                print(f"Call not answered (status: {final_status}). Saving to unanswered.csv")
+                write_unanswered(candidate_name, phone_number, candidate_role, final_status)
 
-# ─────────────────────────────────────────────────────────────
-# Entry
-# ─────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        except Exception as e:
+            print("Error:", str(e))
+            write_unanswered(candidate_name, phone_number, candidate_role, "failed")

@@ -112,9 +112,11 @@ def detect_interest(text: str) -> Optional[str]:
 class TranscriptionInterceptor(FrameProcessor):
     """Pass-through processor that inspects TranscriptionFrames."""
 
-    def __init__(self, candidate_name: str, on_outcome: Callable[[str, str], None]):
+    def __init__(self, candidate_name: str, candidate_phone: str, candidate_role: str, on_outcome: Callable[[str, str, str, str], None]):
         super().__init__()
         self._candidate_name = candidate_name
+        self._candidate_phone = candidate_phone
+        self._candidate_role = candidate_role
         self._on_outcome = on_outcome
         self._fired = False
 
@@ -135,7 +137,7 @@ class TranscriptionInterceptor(FrameProcessor):
                     f"[InterestDetector] {self._candidate_name} → {outcome} "
                     f"(utterance: '{text}')"
                 )
-                self._on_outcome(self._candidate_name, outcome)
+                self._on_outcome(self._candidate_name, self._candidate_phone, self._candidate_role, outcome)
 
         # Always pass frame downstream — we are transparent
         await self.push_frame(frame, direction)
@@ -149,7 +151,9 @@ async def run_bot(
     transport: BaseTransport,
     handle_sigint: bool,
     candidate_name: str = "Candidate",
-    on_outcome: Optional[Callable[[str, str], None]] = None,
+    candidate_phone: str = "",
+    candidate_role: str = "",
+    on_outcome: Optional[Callable[[str, str, str, str], None]] = None,
 ):
     logger.info("Initializing AI voice pipeline")
 
@@ -201,6 +205,8 @@ async def run_bot(
     if on_outcome:
         interceptor = TranscriptionInterceptor(
             candidate_name=candidate_name,
+            candidate_phone=candidate_phone,
+            candidate_role=candidate_role,
             on_outcome=on_outcome,
         )
 
@@ -232,9 +238,17 @@ async def run_bot(
     # ── Events ───────────────────────────────────────────────
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected — sending greeting")
+        logger.info("Client connected — waiting 1.5 seconds for candidate to be ready")
+        import asyncio
+        await asyncio.sleep(1.5)
+        logger.info("Sending greeting and intro")
         await task.queue_frames(
-            [TextFrame(f"Hello, am I speaking with {candidate_name}?")]
+            [
+                TextFrame(
+                    f"Hello, is this {candidate_name}? I am calling from Switchbee Solution regarding a job opportunity. "
+                    "I would like to ask you a few quick questions. May I proceed?"
+                )
+            ]
         )
 
     @transport.event_handler("on_client_disconnected")
@@ -255,7 +269,7 @@ async def bot(
     runner_args: RunnerArguments,
     candidate_names_map: dict = None,
     latest_name: str = "Candidate",
-    on_outcome: Optional[Callable[[str, str], None]] = None,
+    on_outcome: Optional[Callable[[str, str, str, str], None]] = None,
 ):
     """Main bot entry point."""
     logger.info("Waiting for Exotel websocket connection")
@@ -288,8 +302,17 @@ async def bot(
     )
 
     candidate_name = latest_name
-    if candidate_names_map and call_sid and call_sid in candidate_names_map:
-        candidate_name = candidate_names_map[call_sid]
+    candidate_phone = ""
+    candidate_role = ""
+
+    if call_sid:
+        candidate_phone = getattr(runner_args.websocket.app.state, "candidate_phones", {}).get(call_sid, "")
+        candidate_role = getattr(runner_args.websocket.app.state, "candidate_roles", {}).get(call_sid, "")
+        if candidate_names_map and call_sid in candidate_names_map:
+            candidate_name = candidate_names_map[call_sid]
+
+    if not candidate_name:
+        candidate_name = "Candidate"
 
     transport = FastAPIWebsocketTransport(
         websocket=runner_args.websocket,
@@ -305,5 +328,7 @@ async def bot(
         transport,
         getattr(runner_args, "handle_sigint", False),
         candidate_name,
+        candidate_phone,
+        candidate_role,
         on_outcome=on_outcome,
     )

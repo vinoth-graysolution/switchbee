@@ -1,0 +1,39 @@
+# Python artifacts
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Version control
+.git
+.github
+.gitignore
+
+# Environment & secrets
+.env
+*.env
+
+# Docker files themselves
+Dockerfile
+dockerfile
+.dockerignore
+
+# Documentation
+README.md
+error.md
+*.md
+
+# Data files (written at runtime, not baked in)
+*.csv
+
+# Local dev & tooling
+.python-version
+scratch/
+recordings/
+Switchbee/
+conversation_ai/
+
+# IDE
+.vscode/
+.idea/

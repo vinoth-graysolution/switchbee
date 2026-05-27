@@ -10,6 +10,7 @@ dependencies = [
     "fastapi>=0.136.1",
     "pipecat>=0.3.0",
     "pipecat-ai[deepgram,elevenlabs,sarvam,websocket]>=1.2.1",
+    "python-multipart>=0.0.29",
     "requests>=2.34.2",
     "uvicorn>=0.47.0",
 ]
