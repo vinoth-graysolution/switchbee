@@ -38,9 +38,9 @@ COPY --from=builder /app/.venv /app/.venv
 # Copy pre-downloaded NLTK data
 COPY --from=builder /app/nltk_data /app/nltk_data
 
-# Copy application source code
-COPY src/ ./src/
-COPY main.py ./
+# Copy application source code (owned by appuser so it can write CSVs at runtime)
+COPY --chown=appuser:appgroup src/ ./src/
+COPY --chown=appuser:appgroup main.py ./
 
 # Make the venv's executables take priority on PATH
 # Point NLTK_DATA to the pre-downloaded directory
