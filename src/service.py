@@ -19,7 +19,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import aiohttp
 import requests
@@ -36,6 +36,7 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.append(str(_SRC_DIR))
 
 from bot import bot
+from campaign_runner import CampaignRunner, load_campaigns_from_disk
 from pipecat.runner.types import WebSocketRunnerArguments
 
 load_dotenv(override=True)
@@ -166,6 +167,21 @@ class CandidateIn(BaseModel):
 
 class BulkCallRequest(BaseModel):
     candidates: List[CandidateIn]
+
+
+# ─────────────────────────────────────────────────────────────
+# Campaign Pydantic models
+# ─────────────────────────────────────────────────────────────
+
+class CampaignSettings(BaseModel):
+    max_retries: int = 2
+    retry_delay_seconds: int = 60
+
+
+class CampaignCreateRequest(BaseModel):
+    name: str
+    role: str
+    settings: CampaignSettings = CampaignSettings()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -302,6 +318,7 @@ async def lifespan(app: FastAPI):
     app.state.candidate_phones = {}  # call_sid  → phone
     app.state.candidate_roles = {}   # call_sid  → role
     app.state.jobs = {}              # job_id    → job dict
+    app.state.campaigns: Dict[str, CampaignRunner] = load_campaigns_from_disk()
 
     # Ensure output CSVs exist with headers
     _ensure_csv(INTERESTED_CSV)
@@ -574,6 +591,206 @@ async def add_candidate(candidate: CandidateIn) -> JSONResponse:
             writer.writeheader()
         writer.writerow({"name": candidate.name, "phone": candidate.phone, "role": candidate.role})
     return JSONResponse({"added": True, "candidate": candidate.model_dump()})
+
+
+# ─────────────────────────────────────────────────────────────
+# ── Campaign endpoints
+# ─────────────────────────────────────────────────────────────
+
+
+@app.post("/campaigns", status_code=201)
+async def create_campaign(body: CampaignCreateRequest, request: Request) -> JSONResponse:
+    """
+    Create a new campaign.
+
+    Request body:
+        {
+            "name": "June Batch",
+            "role": "Desktop Support Engineer",
+            "settings": { "max_retries": 2, "retry_delay_seconds": 60 }
+        }
+
+    Returns the new campaign_id. Upload candidates next via
+    POST /campaigns/{campaign_id}/candidates.
+    """
+    campaign_id = str(uuid.uuid4())
+    runner = CampaignRunner(
+        campaign_id=campaign_id,
+        name=body.name,
+        role=body.role,
+        max_retries=body.settings.max_retries,
+        retry_delay=body.settings.retry_delay_seconds,
+    )
+    request.app.state.campaigns[campaign_id] = runner
+    print(f"[/campaigns] Created campaign {campaign_id}: {body.name!r}")
+    return JSONResponse(runner.get_summary(), status_code=201)
+
+
+@app.post("/campaigns/{campaign_id}/candidates", status_code=200)
+async def upload_campaign_candidates(
+    campaign_id: str,
+    request: Request,
+    file: Optional[UploadFile] = File(default=None),
+) -> JSONResponse:
+    """
+    Upload a candidates CSV to a campaign.
+
+    Accepts EITHER:
+      • Multipart form upload: field `file` = CSV with columns name, phone, role
+      • JSON body:             { "candidates": [{"name":…,"phone":…,"role":…}] }
+
+    Must be called before starting the campaign.
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    if runner.status not in ("created",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot upload candidates to a campaign with status '{runner.status}'. "
+                   "Create a new campaign or cancel the existing one.",
+        )
+
+    from campaign_runner import _candidates_path
+    import csv as _csv
+
+    candidates: List[dict] = []
+
+    if file is not None:
+        content = await file.read()
+        text = content.decode("utf-8")
+        reader = _csv.DictReader(io.StringIO(text))
+        for row in reader:
+            name = row.get("name", "").strip()
+            phone = row.get("phone", "").strip()
+            role = row.get("role", runner.role).strip() or runner.role
+            if name and phone:
+                candidates.append({"name": name, "phone": phone, "role": role})
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Send a multipart CSV upload (field 'file') or a JSON body with 'candidates' list.",
+            )
+        for c in body.get("candidates", []):
+            name = str(c.get("name", "")).strip()
+            phone = str(c.get("phone", "")).strip()
+            role = str(c.get("role", runner.role)).strip() or runner.role
+            if name and phone:
+                candidates.append({"name": name, "phone": phone, "role": role})
+
+    if not candidates:
+        raise HTTPException(status_code=400, detail="No valid candidates found (each row needs name + phone).")
+
+    # Write candidates.csv for the campaign
+    cand_path = _candidates_path(campaign_id)
+    with open(cand_path, "w", newline="", encoding="utf-8") as f:
+        writer = _csv.DictWriter(f, fieldnames=["name", "phone", "role"])
+        writer.writeheader()
+        writer.writerows(candidates)
+
+    runner._save_meta()
+    print(f"[/campaigns/{campaign_id}/candidates] Saved {len(candidates)} candidates.")
+    return JSONResponse({"campaign_id": campaign_id, "candidates_loaded": len(candidates)})
+
+
+@app.post("/campaigns/{campaign_id}/start")
+async def start_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """
+    Start dialling candidates for the campaign.
+    Candidates must be uploaded first.
+    Returns immediately; the calling loop runs in the background.
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    if runner.status not in ("created",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Campaign is already '{runner.status}'. Only 'created' campaigns can be started.",
+        )
+    if not runner.load_candidates():
+        raise HTTPException(
+            status_code=400,
+            detail="No candidates found. Upload a candidates CSV first via POST /campaigns/{id}/candidates.",
+        )
+
+    asyncio.get_event_loop().create_task(runner.start(request.app.state))
+    print(f"[/campaigns/{campaign_id}/start] Campaign started.")
+    return JSONResponse({"campaign_id": campaign_id, "status": "running"})
+
+
+@app.post("/campaigns/{campaign_id}/pause")
+async def pause_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """
+    Pause a running campaign. The current call will finish,
+    then dialling will suspend until resumed.
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    if runner.status != "running":
+        raise HTTPException(status_code=400, detail=f"Campaign is '{runner.status}', not 'running'.")
+    await runner.pause()
+    return JSONResponse({"campaign_id": campaign_id, "status": runner.status})
+
+
+@app.post("/campaigns/{campaign_id}/resume")
+async def resume_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """
+    Resume a paused campaign.
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    if runner.status != "paused":
+        raise HTTPException(status_code=400, detail=f"Campaign is '{runner.status}', not 'paused'.")
+    await runner.resume(request.app.state)
+    return JSONResponse({"campaign_id": campaign_id, "status": runner.status})
+
+
+@app.post("/campaigns/{campaign_id}/cancel")
+async def cancel_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """
+    Cancel a campaign. The current call will finish but no further calls are made.
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    if runner.status in ("done", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Campaign is already '{runner.status}'.")
+    await runner.cancel()
+    return JSONResponse({"campaign_id": campaign_id, "status": runner.status})
+
+
+@app.get("/campaigns")
+async def list_campaigns(request: Request) -> JSONResponse:
+    """
+    List all campaigns with summary stats.
+    """
+    summaries = [runner.get_summary() for runner in request.app.state.campaigns.values()]
+    # Sort newest first
+    summaries.sort(key=lambda s: s.get("created_at", ""), reverse=True)
+    return JSONResponse(summaries)
+
+
+@app.get("/campaigns/{campaign_id}")
+async def get_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """
+    Get detailed status and per-call results for a campaign.
+
+    Response includes:
+        - Campaign metadata (name, role, status, settings, stats)
+        - Full list of per-call results from results.csv
+    """
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+    summary = runner.get_summary()
+    summary["results"] = runner.get_results()
+    return JSONResponse(summary)
 
 
 # ─────────────────────────────────────────────────────────────

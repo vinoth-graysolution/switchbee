@@ -1,0 +1,20 @@
+{
+  "id": "9b924448-16b7-4554-8098-236d9a3011e3",
+  "name": "string",
+  "role": "string",
+  "status": "created",
+  "created_at": "2026-06-02T06:29:35.861475Z",
+  "started_at": null,
+  "finished_at": null,
+  "settings": {
+    "max_retries": 2,
+    "retry_delay": 60
+  },
+  "stats": {
+    "total_candidates": 0,
+    "total_call_attempts": 0,
+    "completed": 0,
+    "unanswered": 0,
+    "failed": 0
+  }
+}
