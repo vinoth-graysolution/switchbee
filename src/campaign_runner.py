@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Literal, Optional
 _SRC_DIR = Path(__file__).parent
 CAMPAIGNS_DIR = _SRC_DIR / "campaigns"
 
-CampaignStatus = Literal["created", "running", "paused", "cancelled", "done"]
+CampaignStatus = Literal["created", "scheduled", "running", "paused", "cancelled", "done"]
 
 RESULTS_FIELDNAMES = ["name", "phone", "role", "attempt", "call_sid", "final_status"]
 
@@ -96,14 +96,16 @@ class CampaignRunner:
         role: str,
         max_retries: int = 2,
         retry_delay: int = 60,
+        scheduled_at: Optional[str] = None,
     ):
         self.id = campaign_id
         self.name = name
         self.role = role
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.scheduled_at = scheduled_at
 
-        self.status: CampaignStatus = "created"
+        self.status: CampaignStatus = "scheduled" if scheduled_at else "created"
         self.created_at: str = _now_iso()
         self.started_at: Optional[str] = None
         self.finished_at: Optional[str] = None
@@ -135,6 +137,7 @@ class CampaignRunner:
             "settings": {
                 "max_retries": self.max_retries,
                 "retry_delay": self.retry_delay,
+                "scheduled_at": self.scheduled_at,
             },
             "stats": self._compute_stats(),
         }
@@ -144,14 +147,35 @@ class CampaignRunner:
     # ── Stats helpers ────────────────────────────────────────
 
     def _compute_stats(self) -> dict:
-        total = len(self.results)
-        interested = sum(1 for r in self.results if r.get("final_status") == "completed")
-        unanswered = sum(1 for r in self.results if r.get("final_status") in ("no-answer", "busy"))
-        failed = sum(1 for r in self.results if r.get("final_status") in ("failed", "error", "canceled"))
+        by_phone = {}
+        for r in self.results:
+            p = r.get("phone")
+            if not p:
+                continue
+            if p not in by_phone:
+                by_phone[p] = []
+            by_phone[p].append(r)
+
+        attempted = len(by_phone)
+        completed = 0
+        unanswered = 0
+        failed = 0
+
+        for p, attempts in by_phone.items():
+            if any(att.get("final_status") == "completed" for att in attempts):
+                completed += 1
+            else:
+                latest = max(attempts, key=lambda x: int(x.get("attempt") or 1))
+                stat = latest.get("final_status")
+                if stat in ("no-answer", "busy"):
+                    unanswered += 1
+                else:
+                    failed += 1
+
         return {
             "total_candidates": self._candidate_count(),
-            "total_call_attempts": total,
-            "completed": interested,
+            "total_call_attempts": attempted,
+            "completed": completed,
             "unanswered": unanswered,
             "failed": failed,
         }
@@ -370,6 +394,7 @@ def load_campaigns_from_disk() -> Dict[str, CampaignRunner]:
                 role=meta["role"],
                 max_retries=settings.get("max_retries", 2),
                 retry_delay=settings.get("retry_delay", 60),
+                scheduled_at=settings.get("scheduled_at"),
             )
             runner.created_at = meta.get("created_at", runner.created_at)
             runner.started_at = meta.get("started_at")
@@ -382,7 +407,7 @@ def load_campaigns_from_disk() -> Dict[str, CampaignRunner]:
                 runner._pause_event.clear()
             else:
                 runner.status = disk_status
-                if disk_status == "paused":
+                if disk_status == "paused" or disk_status == "scheduled":
                     runner._pause_event.clear()
 
             # Re-load in-memory results from results.csv

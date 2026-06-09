@@ -1,0 +1,21 @@
+{
+  "id": "0717de80-4e0b-4180-8b61-78ffd775d2d3",
+  "name": "Flutter Developer Screening",
+  "role": "Software Developer",
+  "status": "done",
+  "created_at": "2026-06-09T07:05:02.631253Z",
+  "started_at": "2026-06-09T07:05:02.755723Z",
+  "finished_at": "2026-06-09T07:07:22.069274Z",
+  "settings": {
+    "max_retries": 2,
+    "retry_delay": 15,
+    "scheduled_at": null
+  },
+  "stats": {
+    "total_candidates": 1,
+    "total_call_attempts": 1,
+    "completed": 1,
+    "unanswered": 0,
+    "failed": 0
+  }
+}

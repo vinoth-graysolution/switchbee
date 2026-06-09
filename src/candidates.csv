@@ -1,5 +1,5 @@
-name,phone,role
-Elanthendral,+919698350966,teamlead
-vinoth,+919952825938,developer
-kumar,+918946085720,student
-
+name,phone,role,lang,tags,calls,lastContact,lastintent
+Praveen Kumar,+919698350966,teamlead,English,Interested,0,—,Unknown
+vinoth,+919952825938,developer,English,,0,—,Unknown
+kumar,+918946085720,student,English,,0,—,Unknown
+Thirugnanam,+917904892591,Student,Tamil,New User,0,"9 Jun, 12:03 pm",Unknown

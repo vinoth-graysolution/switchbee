@@ -11,3 +11,5 @@ wheels/
 .env
 *.csv
 *.md
+!changelog.md
+!README.md

@@ -86,6 +86,51 @@ def write_outcome(name: str, phone: str, role: str, outcome: str):
     )
 
 
+def update_candidate_call_outcome(phone: str, outcome: str):
+    """
+    Increment candidate calls, set lastContact, and set lastintent to the outcome.
+    Also update tags if needed (e.g., 'Interested' or 'Not Interested').
+    """
+    if not CANDIDATES_CSV.exists():
+        return
+    import datetime
+    now_str = datetime.datetime.now().strftime("%b %d, %I:%M %p")
+    rows = []
+    updated = False
+    try:
+        with open(CANDIDATES_CSV, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames) if reader.fieldnames else ["name", "phone", "role", "lang", "tags", "calls", "lastContact", "lastintent"]
+            for row in reader:
+                db_phone = row.get("phone", "").strip()
+                match_phone = phone.strip()
+                db_digits = "".join(filter(str.isdigit, db_phone))
+                match_digits = "".join(filter(str.isdigit, match_phone))
+                if db_phone == match_phone or (db_digits and match_digits and db_digits == match_digits):
+                    calls = int(row.get("calls", 0) or 0) + 1
+                    row["calls"] = str(calls)
+                    row["lastContact"] = now_str
+                    outcome_label = "Interested" if outcome == "interested" else "Not Interested"
+                    row["lastintent"] = outcome_label
+                    
+                    # Update tags to preserve only User, New User, Interested, Not Interested
+                    tags = [t.strip() for t in row.get("tags", "").split(",") if t.strip()]
+                    tags = [t for t in tags if t not in ["Interested", "Not Interested", "interest", "not interest", "User", "New User", "new user", "user"]]
+                    tags.append(outcome_label)
+                    row["tags"] = ", ".join(tags)
+                    updated = True
+                rows.append(row)
+        if updated:
+            with open(CANDIDATES_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            print(f"[CSV] Updated candidate {phone} stats in candidates.csv: lastintent={outcome}")
+    except Exception as e:
+        print(f"[CSV] Error updating candidate {phone}: {e}")
+
+
+
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
@@ -163,6 +208,11 @@ class CandidateIn(BaseModel):
     name: str
     phone: str
     role: Optional[str] = ""
+    lang: Optional[str] = "English"
+    tags: Optional[str] = ""
+    calls: Optional[int] = 0
+    lastContact: Optional[str] = "—"
+    lastintent: Optional[str] = "Unknown"
 
 
 class BulkCallRequest(BaseModel):
@@ -176,6 +226,7 @@ class BulkCallRequest(BaseModel):
 class CampaignSettings(BaseModel):
     max_retries: int = 2
     retry_delay_seconds: int = 60
+    scheduled_at: Optional[str] = None
 
 
 class CampaignCreateRequest(BaseModel):
@@ -311,6 +362,58 @@ def _write_unanswered(name: str, phone: str, role: str, status: str):
         writer.writerow([name, phone, role, status])
 
 
+
+def _upgrade_candidates_csv():
+    """Ensure candidates.csv has the full headers and migrate old columns if needed."""
+    if not CANDIDATES_CSV.exists():
+        return
+    rows = []
+    try:
+        with open(CANDIDATES_CSV, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and all(h in reader.fieldnames for h in ["lang", "tags", "calls", "lastContact", "lastintent"]):
+                return
+            for row in reader:
+                if row.get("name") or row.get("phone"):
+                    rows.append({
+                        "name": row.get("name") or "",
+                        "phone": row.get("phone") or "",
+                        "role": row.get("role") or "",
+                        "lang": row.get("lang") or "English",
+                        "tags": row.get("tags") or "",
+                        "calls": row.get("calls") or "0",
+                        "lastContact": row.get("lastContact") or "—",
+                        "lastintent": row.get("lastintent") or "Unknown"
+                    })
+        with open(CANDIDATES_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["name", "phone", "role", "lang", "tags", "calls", "lastContact", "lastintent"])
+            writer.writeheader()
+            writer.writerows(rows)
+        print("[CSV] Upgraded candidates.csv to new 8-column schema.")
+    except Exception as e:
+        print(f"[CSV] Error upgrading candidates.csv: {e}")
+
+
+async def _check_scheduled_campaigns(app: FastAPI):
+    """Periodically check for scheduled campaigns whose time has come."""
+    from datetime import datetime
+    while True:
+        try:
+            await asyncio.sleep(5)
+            now_str = datetime.utcnow().isoformat() + "Z"
+            for campaign_id in list(app.state.campaigns.keys()):
+                runner = app.state.campaigns.get(campaign_id)
+                if runner and runner.status == "scheduled" and runner.scheduled_at:
+                    if runner.scheduled_at <= now_str:
+                        print(f"[Scheduler] Starting scheduled campaign {runner.id} ({runner.name})")
+                        runner._pause_event.set()
+                        asyncio.create_task(runner.start(app.state))
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            print(f"[Scheduler] Error checking campaigns: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.session = aiohttp.ClientSession()
@@ -320,11 +423,20 @@ async def lifespan(app: FastAPI):
     app.state.jobs = {}              # job_id    → job dict
     app.state.campaigns: Dict[str, CampaignRunner] = load_campaigns_from_disk()
 
-    # Ensure output CSVs exist with headers
+    # Ensure CSVs and schemas are correct on startup
+    _upgrade_candidates_csv()
     _ensure_csv(INTERESTED_CSV)
     _ensure_csv(NOT_INTERESTED_CSV)
 
+    # Start background scheduler task
+    scheduler_task = asyncio.create_task(_check_scheduled_campaigns(app))
+
     yield
+    scheduler_task.cancel()
+    try:
+        await scheduler_task
+    except asyncio.CancelledError:
+        pass
     await app.state.session.close()
 
 
@@ -420,6 +532,7 @@ async def websocket_endpoint(websocket: WebSocket):
             Callback fired by the bot when candidate interest is detected.
             """
             write_outcome(name=name, phone=phone, role=role, outcome=outcome)
+            update_candidate_call_outcome(phone=phone, outcome=outcome)
 
         await bot(
             runner_args,
@@ -577,7 +690,19 @@ async def list_candidates() -> JSONResponse:
         return JSONResponse([])
     with open(CANDIDATES_CSV, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        rows = [row for row in reader if row.get("name") or row.get("phone")]
+        rows = []
+        for row in reader:
+            if row.get("name") or row.get("phone"):
+                rows.append({
+                    "name": row.get("name", ""),
+                    "phone": row.get("phone", ""),
+                    "role": row.get("role", ""),
+                    "lang": row.get("lang", "English"),
+                    "tags": row.get("tags", ""),
+                    "calls": int(row.get("calls", 0) or 0),
+                    "lastContact": row.get("lastContact", "—"),
+                    "lastintent": row.get("lastintent", "Unknown")
+                })
     return JSONResponse(rows)
 
 
@@ -586,11 +711,85 @@ async def add_candidate(candidate: CandidateIn) -> JSONResponse:
     """Append a new candidate to candidates.csv."""
     file_exists = CANDIDATES_CSV.exists()
     with open(CANDIDATES_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["name", "phone", "role"])
+        writer = csv.DictWriter(f, fieldnames=["name", "phone", "role", "lang", "tags", "calls", "lastContact", "lastintent"])
         if not file_exists:
             writer.writeheader()
-        writer.writerow({"name": candidate.name, "phone": candidate.phone, "role": candidate.role})
+        writer.writerow({
+            "name": candidate.name,
+            "phone": candidate.phone,
+            "role": candidate.role,
+            "lang": candidate.lang,
+            "tags": candidate.tags,
+            "calls": candidate.calls,
+            "lastContact": candidate.lastContact,
+            "lastintent": candidate.lastintent
+        })
     return JSONResponse({"added": True, "candidate": candidate.model_dump()})
+
+
+@app.put("/candidates/{phone}")
+async def update_candidate(phone: str, candidate: CandidateIn) -> JSONResponse:
+    """Update an existing candidate in candidates.csv."""
+    if not CANDIDATES_CSV.exists():
+        raise HTTPException(status_code=404, detail="No candidates found")
+    
+    updated = False
+    rows = []
+    fieldnames = ["name", "phone", "role", "lang", "tags", "calls", "lastContact", "lastintent"]
+    with open(CANDIDATES_CSV, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            clean_row = {k: v for k, v in row.items() if k in fieldnames}
+            if clean_row.get("phone") == phone:
+                clean_row["name"] = candidate.name
+                clean_row["role"] = candidate.role
+                clean_row["phone"] = candidate.phone
+                clean_row["lang"] = candidate.lang
+                clean_row["tags"] = candidate.tags
+                clean_row["calls"] = str(candidate.calls)
+                clean_row["lastContact"] = candidate.lastContact
+                clean_row["lastintent"] = candidate.lastintent
+                updated = True
+            rows.append(clean_row)
+            
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Candidate with phone {phone} not found")
+        
+    with open(CANDIDATES_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        
+    return JSONResponse({"updated": True, "candidate": candidate.model_dump()})
+
+
+@app.delete("/candidates/{phone}")
+async def delete_candidate(phone: str) -> JSONResponse:
+    """Delete a candidate from candidates.csv."""
+    if not CANDIDATES_CSV.exists():
+        raise HTTPException(status_code=404, detail="No candidates found")
+        
+    deleted = False
+    rows = []
+    fieldnames = ["name", "phone", "role", "lang", "tags", "calls", "lastContact", "lastintent"]
+    with open(CANDIDATES_CSV, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            clean_row = {k: v for k, v in row.items() if k in fieldnames}
+            if clean_row.get("phone") == phone:
+                deleted = True
+                continue
+            rows.append(clean_row)
+            
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Candidate with phone {phone} not found")
+        
+    with open(CANDIDATES_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        
+    return JSONResponse({"deleted": True})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -620,6 +819,7 @@ async def create_campaign(body: CampaignCreateRequest, request: Request) -> JSON
         role=body.role,
         max_retries=body.settings.max_retries,
         retry_delay=body.settings.retry_delay_seconds,
+        scheduled_at=body.settings.scheduled_at,
     )
     request.app.state.campaigns[campaign_id] = runner
     print(f"[/campaigns] Created campaign {campaign_id}: {body.name!r}")
@@ -631,6 +831,7 @@ async def upload_campaign_candidates(
     campaign_id: str,
     request: Request,
     file: Optional[UploadFile] = File(default=None),
+    append: bool = False,
 ) -> JSONResponse:
     """
     Upload a candidates CSV to a campaign.
@@ -644,17 +845,17 @@ async def upload_campaign_candidates(
     runner = request.app.state.campaigns.get(campaign_id)
     if runner is None:
         raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
-    if runner.status not in ("created",):
+    if runner.status not in ("created", "scheduled", "paused"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot upload candidates to a campaign with status '{runner.status}'. "
-                   "Create a new campaign or cancel the existing one.",
+                   "Only created, scheduled, or paused campaigns can be modified.",
         )
 
     from campaign_runner import _candidates_path
     import csv as _csv
 
-    candidates: List[dict] = []
+    new_candidates: List[dict] = []
 
     if file is not None:
         content = await file.read()
@@ -665,7 +866,7 @@ async def upload_campaign_candidates(
             phone = row.get("phone", "").strip()
             role = row.get("role", runner.role).strip() or runner.role
             if name and phone:
-                candidates.append({"name": name, "phone": phone, "role": role})
+                new_candidates.append({"name": name, "phone": phone, "role": role})
     else:
         try:
             body = await request.json()
@@ -679,21 +880,36 @@ async def upload_campaign_candidates(
             phone = str(c.get("phone", "")).strip()
             role = str(c.get("role", runner.role)).strip() or runner.role
             if name and phone:
-                candidates.append({"name": name, "phone": phone, "role": role})
+                new_candidates.append({"name": name, "phone": phone, "role": role})
 
-    if not candidates:
+    if not new_candidates and not append:
         raise HTTPException(status_code=400, detail="No valid candidates found (each row needs name + phone).")
+
+    # Load existing candidates if append is requested
+    final_candidates = []
+    if append:
+        final_candidates = runner.load_candidates()
+
+    seen_phones = {c["phone"].strip() for c in final_candidates}
+    for c in new_candidates:
+        p_clean = c["phone"].strip()
+        if p_clean not in seen_phones:
+            final_candidates.append(c)
+            seen_phones.add(p_clean)
+
+    if not final_candidates:
+        raise HTTPException(status_code=400, detail="No candidates to save.")
 
     # Write candidates.csv for the campaign
     cand_path = _candidates_path(campaign_id)
     with open(cand_path, "w", newline="", encoding="utf-8") as f:
         writer = _csv.DictWriter(f, fieldnames=["name", "phone", "role"])
         writer.writeheader()
-        writer.writerows(candidates)
+        writer.writerows(final_candidates)
 
     runner._save_meta()
-    print(f"[/campaigns/{campaign_id}/candidates] Saved {len(candidates)} candidates.")
-    return JSONResponse({"campaign_id": campaign_id, "candidates_loaded": len(candidates)})
+    print(f"[/campaigns/{campaign_id}/candidates] Saved {len(final_candidates)} total candidates (appended {len(new_candidates)}).")
+    return JSONResponse({"campaign_id": campaign_id, "candidates_loaded": len(final_candidates)})
 
 
 @app.post("/campaigns/{campaign_id}/start")
@@ -793,9 +1009,40 @@ async def get_campaign(campaign_id: str, request: Request) -> JSONResponse:
     return JSONResponse(summary)
 
 
+@app.put("/campaigns/{campaign_id}")
+async def update_campaign(campaign_id: str, body: CampaignCreateRequest, request: Request) -> JSONResponse:
+    """Update an existing campaign's settings."""
+    runner = request.app.state.campaigns.get(campaign_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Campaign '{campaign_id}' not found.")
+        
+    runner.name = body.name
+    runner.role = body.role
+    runner.max_retries = body.settings.max_retries
+    runner.retry_delay = body.settings.retry_delay_seconds
+    runner._save_meta()
+    
+    return JSONResponse(runner.get_summary())
+
+
+@app.delete("/campaigns/{campaign_id}")
+async def delete_campaign(campaign_id: str, request: Request) -> JSONResponse:
+    """Delete a campaign and its directory from disk."""
+    import shutil
+    request.app.state.campaigns.pop(campaign_id, None)
+    
+    from campaign_runner import _campaign_dir
+    camp_dir = _campaign_dir(campaign_id)
+    if camp_dir.exists() and camp_dir.is_dir():
+        shutil.rmtree(camp_dir)
+        return JSONResponse({"deleted": True})
+        
+    return JSONResponse({"deleted": True})
+
+
 # ─────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    uvicorn.run("service:app", host="0.0.0.0", port=7860, reload=True, app_dir=str(_SRC_DIR))
